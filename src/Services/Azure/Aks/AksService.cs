@@ -19,7 +19,7 @@ public class AksService(
         ValidateRequiredParameters(subscriptionId);
         var subscription = await _subscriptionService.GetSubscription(subscriptionId, tenant, retryPolicy);
         var clusters = new List<string>();
-        await foreach (var cluster in subscription.GetContainerServiceManagedClusters().GetAllAsync())
+        foreach (var cluster in subscription.GetContainerServiceManagedClusters())
         {
             if (!string.IsNullOrEmpty(cluster.Data.Name))
             {

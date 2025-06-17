@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using AzureMcp.Commands.Aks;
+using AzureMcp.Models.Command;
 using AzureMcp.Options;
 using AzureMcp.Options.Aks.Cluster;
 using AzureMcp.Services.Interfaces;

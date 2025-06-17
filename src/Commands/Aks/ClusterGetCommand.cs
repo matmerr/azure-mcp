@@ -37,7 +37,14 @@ public sealed class ClusterGetCommand(ILogger<ClusterGetCommand> logger) : BaseA
                 options.Tenant,
                 options.RetryPolicy);
 
-            context.Response.Results = ResponseResult.Create(cluster, AksJsonContext.Default.ContainerServiceManagedClusterData);
+            var result = new ClusterGetCommandResult(
+                cluster.Name,
+                cluster.Location.ToString(),
+                cluster.KubernetesVersion,
+                cluster.ProvisioningState?.ToString(),
+                cluster.NodeResourceGroup);
+
+            context.Response.Results = ResponseResult.Create(result, AksJsonContext.Default.ClusterGetCommandResult);
         }
         catch (Exception ex)
         {
@@ -47,4 +54,11 @@ public sealed class ClusterGetCommand(ILogger<ClusterGetCommand> logger) : BaseA
 
         return context.Response;
     }
+
+    internal record ClusterGetCommandResult(
+        string? Name,
+        string Location,
+        string? KubernetesVersion,
+        string? ProvisioningState,
+        string? NodeResourceGroup);
 }

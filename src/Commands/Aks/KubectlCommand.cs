@@ -1,4 +1,5 @@
 using AzureMcp.Models.Command;
+using AzureMcp.Models.Option;
 using AzureMcp.Options.Aks.Kubectl;
 using AzureMcp.Services.Interfaces;
 using Microsoft.Extensions.Logging;

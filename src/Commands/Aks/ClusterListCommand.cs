@@ -1,11 +1,10 @@
-using AzureMcp.Commands.Subscription;
 using AzureMcp.Options.Aks.Cluster;
 using AzureMcp.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 
 namespace AzureMcp.Commands.Aks;
 
-public sealed class ClusterListCommand(ILogger<ClusterListCommand> logger) : SubscriptionCommand<ClusterListOptions>
+public sealed class ClusterListCommand(ILogger<ClusterListCommand> logger) : BaseAksCommand<ClusterListOptions>
 {
     private const string CommandTitle = "List AKS Clusters";
     private readonly ILogger<ClusterListCommand> _logger = logger;
@@ -16,6 +15,9 @@ public sealed class ClusterListCommand(ILogger<ClusterListCommand> logger) : Sub
         "List all AKS clusters in a subscription.";
 
     public override string Title => CommandTitle;
+
+    // Resource group is optional for list command - will list from all resource groups if not specified
+    protected override bool RequiresResourceGroup => false;
 
     [McpServerTool(Destructive = false, ReadOnly = true, Title = CommandTitle)]
     public override async Task<CommandResponse> ExecuteAsync(CommandContext context, ParseResult parseResult)

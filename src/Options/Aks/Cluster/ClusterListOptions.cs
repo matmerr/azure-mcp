@@ -1,5 +1,5 @@
-using AzureMcp.Options;
+using AzureMcp.Options.Aks;
 
 namespace AzureMcp.Options.Aks.Cluster;
 
-public class ClusterListOptions : SubscriptionOptions;
+public class ClusterListOptions : BaseAksOptions;
