@@ -1,10 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using Azure.ResourceManager.ContainerService;
+using Azure.ResourceManager.ContainerService.Models;
 using AzureMcp.Areas.Aks.Models;
 using AzureMcp.Options;
 using AzureMcp.Services.Azure;
+using AzureMcp.Services.Azure.ResourceGroup;
 using AzureMcp.Services.Azure.Subscription;
 using AzureMcp.Services.Azure.Tenant;
 using AzureMcp.Services.Caching;
@@ -14,10 +17,12 @@ namespace AzureMcp.Areas.Aks.Services;
 public sealed class AksService(
     ISubscriptionService subscriptionService,
     ITenantService tenantService,
-    ICacheService cacheService) : BaseAzureService(tenantService), IAksService
+    ICacheService cacheService,
+    IResourceGroupService resourceGroupService) : BaseAzureService(tenantService), IAksService
 {
     private readonly ISubscriptionService _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
     private readonly ICacheService _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+    private readonly IResourceGroupService _resourceGroupService = resourceGroupService ?? throw new ArgumentNullException(nameof(resourceGroupService));
 
     private const string CacheGroup = "aks";
     private const string AksClustersCacheKey = "clusters";
@@ -121,6 +126,116 @@ public sealed class AksService(
         }
     }
 
+    public async Task<Cluster> CreateCluster(
+        string subscription,
+        string clusterName,
+        string resourceGroup,
+        string location,
+        int nodeCount = 3,
+        string nodeVmSize = "Standard_DS2_v2",
+        string? kubernetesVersion = null,
+        string? dnsPrefix = null,
+        string networkPlugin = "azure",
+        string networkDataplane = "cilium",
+        string networkPolicy = "cilium",
+        string networkPluginMode = "overlay",
+        bool enableAcns = true,
+        string? tenant = null,
+        RetryPolicyOptions? retryPolicy = null)
+    {
+        ValidateRequiredParameters(subscription, clusterName, resourceGroup, location);
+
+        if (nodeCount < 1 || nodeCount > 1000)
+        {
+            throw new ArgumentException("Node count must be between 1 and 1000.", nameof(nodeCount));
+        }
+
+        var subscriptionResource = await _subscriptionService.GetSubscription(subscription, tenant, retryPolicy);
+
+        try
+        {
+            // Check if resource group exists, create it if it doesn't
+            var existingResourceGroup = await _resourceGroupService.GetResourceGroup(
+                subscriptionResource.Data.SubscriptionId!, 
+                resourceGroup, 
+                tenant, 
+                retryPolicy);
+
+            if (existingResourceGroup == null)
+            {
+                // Resource group doesn't exist, create it
+                Console.WriteLine($"Resource group '{resourceGroup}' not found. Creating it in location '{location}'...");
+                await _resourceGroupService.CreateResourceGroup(subscription, resourceGroup, location, tenant, retryPolicy);
+                Console.WriteLine($"Resource group '{resourceGroup}' created successfully.");
+                
+                // Add a small delay to ensure the resource group is available
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+
+            // Get the resource group (should exist now)
+            var resourceGroupResource = await subscriptionResource
+                .GetResourceGroupAsync(resourceGroup);
+
+            if (resourceGroupResource?.Value == null)
+            {
+                throw new InvalidOperationException($"Resource group '{resourceGroup}' could not be found or created.");
+            }
+
+            // Build cluster data
+            var clusterData = new ContainerServiceManagedClusterData(new Azure.Core.AzureLocation(location))
+            {
+                DnsPrefix = dnsPrefix ?? clusterName,
+                KubernetesVersion = kubernetesVersion,
+                Identity = new Azure.ResourceManager.Models.ManagedServiceIdentity(Azure.ResourceManager.Models.ManagedServiceIdentityType.SystemAssigned),
+                EnableRbac = true,
+                NetworkProfile = CreateNetworkProfile(networkPlugin, networkDataplane, networkPolicy, networkPluginMode, enableAcns),
+                Sku = new ManagedClusterSku()
+                {
+                    Name = ManagedClusterSkuName.Base,
+                    Tier = ManagedClusterSkuTier.Free
+                },
+                
+            };
+
+            // Add agent pool profile
+            var agentPoolProfile = new ManagedClusterAgentPoolProfile("nodepool1")
+            {
+                Count = nodeCount,
+                VmSize = nodeVmSize,
+                OSType = ContainerServiceOSType.Linux,
+                Mode = AgentPoolMode.System,
+                EnableAutoScaling = false
+                // Note: Not setting AvailabilityZones to ensure compatibility across all regions
+            };
+
+            clusterData.AgentPoolProfiles.Add(agentPoolProfile);
+
+            // Start cluster creation
+            var createOperation = await resourceGroupResource.Value
+                .GetContainerServiceManagedClusters()
+                .CreateOrUpdateAsync(Azure.WaitUntil.Completed, clusterName, clusterData);
+
+            if (createOperation?.Value?.Data == null)
+            {
+                throw new InvalidOperationException($"Failed to create AKS cluster '{clusterName}'.");
+            }
+
+            var cluster = ConvertToClusterModel(createOperation.Value);
+
+            // Invalidate cache for this subscription to refresh cluster lists
+            var listCacheKey = string.IsNullOrEmpty(tenant)
+                ? $"{AksClustersCacheKey}_{subscription}"
+                : $"{AksClustersCacheKey}_{subscription}_{tenant}";
+            await _cacheService.DeleteAsync(CacheGroup, listCacheKey);
+
+            return cluster;
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Error creating AKS cluster '{clusterName}': {ex.Message}", ex);
+        }
+    }
+
     private static Cluster ConvertToClusterModel(ContainerServiceManagedClusterResource clusterResource)
     {
         var data = clusterResource.Data;
@@ -148,5 +263,58 @@ public sealed class AksService(
             SkuTier = data.Sku?.Tier?.ToString(),
             Tags = data.Tags?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
         };
+    }
+
+    private static ContainerServiceNetworkProfile CreateNetworkProfile(
+        string networkPlugin,
+        string networkDataplane,
+        string networkPolicy,
+        string networkPluginMode,
+        bool enableAcns)
+    {
+        var networkProfile = new ContainerServiceNetworkProfile()
+        {
+            NetworkPlugin = networkPlugin,
+            NetworkDataplane = networkDataplane,
+            NetworkPolicy = networkPolicy,
+            NetworkPluginMode = networkPluginMode,
+            ServiceCidr = "10.0.0.0/16",
+            DnsServiceIP = "10.0.0.10",
+            PodCidr = "10.244.0.0/16"
+        };
+
+        // Add ACNS configuration if enabled using serializedAdditionalRawData
+        if (enableAcns)
+        {
+            // Create the Advanced Networking configuration according to Azure REST API spec
+            var advancedNetworkingJson = """
+            {
+                "enabled": true,
+                "observability": {
+                    "enabled": true
+                },
+                "security": {
+                    "enabled": true
+                }
+            }
+            """;
+            
+            // Note: This approach uses reflection to access the private field
+            // In a real implementation, you might need to use a different approach
+            // or wait for official SDK support for ACNS
+            var field = typeof(ContainerServiceNetworkProfile)
+                .GetField("_serializedAdditionalRawData", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            
+            if (field != null)
+            {
+                var additionalData = new Dictionary<string, BinaryData>
+                {
+                    ["advancedNetworking"] = BinaryData.FromString(advancedNetworkingJson)
+                };
+                field.SetValue(networkProfile, additionalData);
+            }
+        }
+
+        return networkProfile;
     }
 }

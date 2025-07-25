@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using Azure;
 using Azure.ResourceManager.Resources;
 using AzureMcp.Models.ResourceGroup;
 using AzureMcp.Options;
@@ -102,9 +103,45 @@ public class ResourceGroupService(ICacheService cacheService, ISubscriptionServi
 
             return resourceGroupResponse?.Value;
         }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            // Resource group not found - return null instead of throwing
+            return null;
+        }
         catch (Exception ex)
         {
             throw new Exception($"Error retrieving resource group {resourceGroupName}: {ex.Message}", ex);
+        }
+    }
+
+    public async Task<ResourceGroupInfo> CreateResourceGroup(string subscription, string resourceGroupName, string location, string? tenant = null, RetryPolicyOptions? retryPolicy = null)
+    {
+        ValidateRequiredParameters(subscription, resourceGroupName, location);
+
+        var subscriptionResource = await _subscriptionService.GetSubscription(subscription, tenant, retryPolicy);
+
+        try
+        {
+            var resourceGroupData = new ResourceGroupData(location);
+            var operation = await subscriptionResource.GetResourceGroups()
+                .CreateOrUpdateAsync(WaitUntil.Completed, resourceGroupName, resourceGroupData)
+                .ConfigureAwait(false);
+
+            var createdResourceGroup = operation.Value;
+            
+            // Invalidate cache since we created a new resource group
+            var subscriptionId = subscriptionResource.Data.SubscriptionId;
+            var cacheKey = $"{CacheKey}_{subscriptionId}_{tenant ?? "default"}";
+            await _cacheService.DeleteAsync(CacheGroup, cacheKey);
+
+            return new ResourceGroupInfo(
+                createdResourceGroup.Data.Name,
+                createdResourceGroup.Data.Id.ToString(),
+                createdResourceGroup.Data.Location.ToString());
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Error creating resource group '{resourceGroupName}' in location '{location}': {ex.Message}", ex);
         }
     }
 }
